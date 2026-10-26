@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import re
 import asyncio
 import errno
 import json
@@ -319,7 +320,10 @@ async def main() -> None:
         print(f"Using friendly name: {args.name}")
         friendly_name = args.name
 
-    device_name = f"lva-{mac_address_clean}"
+    # ESPHome node name (HA discovery, entry title): the given name, slugged
+    # to what ESPHome allows, else lva-<mac>.
+    device_name = re.sub(r"[^a-z0-9-]+", "-", args.name.lower()).strip("-") if args.name else ""
+    device_name = device_name or f"lva-{mac_address_clean}"
 
     print(f"Device name: {device_name}")
 
