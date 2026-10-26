@@ -18,6 +18,8 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     AuthenticationRequest,
     DeviceInfoRequest,
     DeviceInfoResponse,
+    HomeassistantActionRequest,
+    HomeassistantServiceMap,
     LightCommandRequest,
     ListEntitiesDoneResponse,
     ListEntitiesRequest,
@@ -580,6 +582,7 @@ class VoiceSatelliteProtocol(APIServer):
             self._continue_conversation = False
             self._pipeline_active = True
             self._awaiting_run_start = False
+            self._speaker_begin()
 
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_START:
             self._emit(LVAEvent.THINKING)
@@ -598,6 +601,7 @@ class VoiceSatelliteProtocol(APIServer):
             VoiceAssistantEventType.VOICE_ASSISTANT_STT_END,
         ):
             self._is_streaming_audio = False
+            self._speaker_finish()
             if event_type == VoiceAssistantEventType.VOICE_ASSISTANT_STT_END:
                 stt_text = data.get("text", "").strip()
                 if stt_text:
@@ -627,6 +631,7 @@ class VoiceSatelliteProtocol(APIServer):
             if self._awaiting_run_start:
                 _LOGGER.debug("RUN_END of a previous run; a new one is starting")
                 return
+            self._speaker_end()
             self._is_streaming_audio = False
             if not self._tts_played:
                 self._pipeline_active = False
@@ -640,7 +645,71 @@ class VoiceSatelliteProtocol(APIServer):
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_ERROR:
             # A rejected start never gets a RUN_START; let its RUN_END through.
             self._awaiting_run_start = False
+            self._speaker_end()
             self._emit(LVAEvent.PIPELINE_ERROR)
+
+    # ------------------------------------------------------------------
+    # Speaker identification (speaker_id/): who is talking, per run
+    # ------------------------------------------------------------------
+    # Each run is reported to Home Assistant as the event
+    # ``esphome.lva_speaker`` (ESPHome devices may fire ``esphome.*`` events;
+    # HA adds this device's id): "pending" at RUN_START, then the result once
+    # end of speech has been identified — while HA is still transcribing.
+    # The ByteHomeDash integration waits briefly for a pending result before
+    # the conversation agent answers, and personalises for that device's
+    # turn only.
+
+    def _speaker_begin(self) -> None:
+        svc = self.state.speaker_id
+        if svc is None:
+            return
+        self._speaker_run = svc.begin_run()
+        self._speaker_event({"run": self._speaker_run, "status": "pending", "source": svc.source})
+
+    def _speaker_finish(self) -> None:
+        svc = self.state.speaker_id
+        if svc is not None:
+            svc.finish(self._speaker_result)
+
+    def _speaker_end(self) -> None:
+        svc = self.state.speaker_id
+        if svc is not None:
+            svc.end_run()
+
+    def _speaker_result(self, run: int, result) -> None:
+        if run != getattr(self, "_speaker_run", None):
+            return
+        _LOGGER.info(
+            "Speaker: %s (%s, score %s, %.1f s of speech, %s ms)",
+            result.speaker_id or "unknown",
+            result.reason or "identified",
+            result.score,
+            result.speech_seconds,
+            result.timings_ms.get("total", result.timings_ms.get("embed", 0)),
+        )
+        self._speaker_event(
+            {
+                "run": run,
+                "status": "done",
+                "speaker_id": result.speaker_id or "",
+                "identified": result.identified,
+                "score": "" if result.score is None else result.score,
+                "reason": result.reason or "",
+                "source": result.source,
+                "elapsed_ms": result.timings_ms.get("total", result.timings_ms.get("embed", 0)),
+            }
+        )
+
+    def _speaker_event(self, data: Dict[str, Any]) -> None:
+        self.send_messages(
+            [
+                HomeassistantActionRequest(
+                    service="esphome.lva_speaker",
+                    is_event=True,
+                    data=[HomeassistantServiceMap(key=k, value=str(v).lower() if isinstance(v, bool) else str(v)) for k, v in data.items()],
+                )
+            ]
+        )
 
     # ------------------------------------------------------------------
     # Timer event handler
@@ -888,6 +957,9 @@ class VoiceSatelliteProtocol(APIServer):
     def handle_audio(self, audio_chunk: bytes, audio_chunk_2: Optional[bytes] = None) -> None:
         if not self._is_streaming_audio or self.state.muted:
             return
+        if self.state.speaker_id is not None:
+            # The same chunk that goes to HA; identified at end of speech.
+            self.state.speaker_id.feed(audio_chunk)
         if _HAS_AUDIO_DATA2 and audio_chunk_2 is not None:
             self.send_messages([VoiceAssistantAudio(data=audio_chunk, data2=audio_chunk_2)])
         else:

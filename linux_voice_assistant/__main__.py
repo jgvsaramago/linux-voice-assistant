@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import argparse
-import re
 import asyncio
 import errno
 import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -221,6 +221,15 @@ async def main() -> None:
         action="store_true",
         help="Disable the peripheral WebSocket API entirely",
     )
+    # Speaker identification (speaker_id/, docs/speaker_identification.md)
+    parser.add_argument("--speaker-id", action="store_true", help="Identify who is speaking and tell Home Assistant (local, opt-in)")
+    parser.add_argument("--speaker-id-backend", default="auto", choices=["cpu", "rknn", "auto"], help="Inference backend (auto: NPU if usable, else CPU)")
+    parser.add_argument("--speaker-id-model", help="Speaker-embedding model (default: local/speaker_models/nemo_en_titanet_small.onnx)")
+    parser.add_argument("--speaker-id-profiles", help="Enrolled speakers file (default: local/speaker_profiles.json)")
+    parser.add_argument("--speaker-id-threshold", type=float, default=0.45, help="Minimum cosine score to name a speaker")
+    parser.add_argument("--speaker-id-margin", type=float, default=0.10, help="Minimum lead over the second-best speaker")
+    parser.add_argument("--speaker-id-min-speech", type=float, default=1.0, help="Seconds of speech needed to try")
+    parser.add_argument("--speaker-id-threads", type=int, default=2, help="CPU threads for the speaker model")
     parser.add_argument(
         "--peripheral-startup-wait",
         type=float,
@@ -474,6 +483,8 @@ async def main() -> None:
         listen_during_wake_sound=args.listen_during_wake_sound,
     )
 
+    state.speaker_id = _start_speaker_id(args)
+
     if fallback_used:
         # Fallback to the default model was used, save as active wake words
         _LOGGER.debug("Fallback was used, save default wake words in Preferences.")
@@ -647,6 +658,31 @@ def _setup_logging(args: argparse.Namespace) -> None:
 
 
 # -----------------------------------------------------------------------------
+
+
+def _start_speaker_id(args):
+    """The speaker-identification service, or None (disabled or unavailable:
+    the voice assistant works the same without it)."""
+    if not args.speaker_id:
+        return None
+    try:
+        from .speaker_id import ProfileStore, SpeakerIdentifier, SpeakerIdService, create_backend
+        from .speaker_id.__main__ import DEFAULT_MODEL, DEFAULT_PROFILES
+
+        backend = create_backend(args.speaker_id_backend, Path(args.speaker_id_model or DEFAULT_MODEL), args.speaker_id_threads)
+        store = ProfileStore(Path(args.speaker_id_profiles or DEFAULT_PROFILES), backend.model_id, backend.dim)
+        identifier = SpeakerIdentifier(backend, store, args.speaker_id_threshold, args.speaker_id_margin, args.speaker_id_min_speech)
+        service = SpeakerIdService(identifier, asyncio.get_running_loop())
+        _LOGGER.info(
+            "Speaker id on: %s, %d speaker(s) enrolled%s",
+            identifier.source,
+            len(store.speakers),
+            f" — profiles unusable: {store.incompatible}" if store.incompatible else "",
+        )
+        return service
+    except Exception as err:  # noqa: BLE001 - never stop the assistant over this
+        _LOGGER.warning("Speaker id unavailable, continuing without it: %s", err)
+        return None
 
 
 def process_audio(state: ServerState, mic, block_size: int):

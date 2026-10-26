@@ -38,6 +38,10 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
+# Local speaker identification (docs/speaker_identification.md)
+speaker-id = [
+    "sherpa-onnx>=1.12,<2",
+]
 dev = [
     "black",
     "flake8",

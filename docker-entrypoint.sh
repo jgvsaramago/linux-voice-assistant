@@ -160,6 +160,19 @@ if [ -n "${PERIPHERAL_STARTUP_WAIT}" ]; then
   EXTRA_ARGS+=( "--peripheral-startup-wait" "$PERIPHERAL_STARTUP_WAIT" )
 fi
 
+# Speaker identification (docs/speaker_identification.md)
+if [ "$SPEAKER_ID" = "1" ]; then
+  EXTRA_ARGS+=( "--speaker-id" )
+fi
+for pair in "SPEAKER_ID_BACKEND:--speaker-id-backend" "SPEAKER_ID_MODEL:--speaker-id-model" "SPEAKER_ID_PROFILES:--speaker-id-profiles" \
+            "SPEAKER_ID_THRESHOLD:--speaker-id-threshold" "SPEAKER_ID_MARGIN:--speaker-id-margin" \
+            "SPEAKER_ID_MIN_SPEECH:--speaker-id-min-speech" "SPEAKER_ID_THREADS:--speaker-id-threads"; do
+  var="${pair%%:*}"; flag="${pair#*:}"
+  if [ -n "${!var}" ]; then
+    EXTRA_ARGS+=( "$flag" "${!var}" )
+  fi
+done
+
 if [ "$DISABLE_PERIPHERAL_API" = "1" ]; then
   EXTRA_ARGS+=( "--disable-peripheral-api" )
 fi
