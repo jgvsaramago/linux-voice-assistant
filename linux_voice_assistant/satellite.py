@@ -350,6 +350,10 @@ class VoiceSatelliteProtocol(APIServer):
         self._timer_ring_start: Optional[float] = None
         self._processing = False
         self._pipeline_active = False
+        # A start request sent to HA whose RUN_START hasn't arrived yet: a
+        # RUN_END seen meanwhile belongs to the previous run and must not
+        # stop the audio the new one is waiting for.
+        self._awaiting_run_start = False
         self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
         self._disconnect_event = asyncio.Event()
 
@@ -571,6 +575,7 @@ class VoiceSatelliteProtocol(APIServer):
             self._tts_played = False
             self._continue_conversation = False
             self._pipeline_active = True
+            self._awaiting_run_start = False
 
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_START:
             self._emit(LVAEvent.THINKING)
@@ -615,6 +620,9 @@ class VoiceSatelliteProtocol(APIServer):
             self.play_tts()
 
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END:
+            if self._awaiting_run_start:
+                _LOGGER.debug("RUN_END of a previous run; a new one is starting")
+                return
             self._is_streaming_audio = False
             if not self._tts_played:
                 self._pipeline_active = False
@@ -626,6 +634,8 @@ class VoiceSatelliteProtocol(APIServer):
             self._tts_played = False
 
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_ERROR:
+            # A rejected start never gets a RUN_START; let its RUN_END through.
+            self._awaiting_run_start = False
             self._emit(LVAEvent.PIPELINE_ERROR)
 
     # ------------------------------------------------------------------
@@ -913,6 +923,7 @@ class VoiceSatelliteProtocol(APIServer):
             "Starting audio streaming for: %s",
             wake_word_phrase,
         )
+        self._awaiting_run_start = True
         self.send_messages([VoiceAssistantRequest(start=True, wake_word_phrase=wake_word_phrase)])
         self._is_streaming_audio = True
         self._emit(LVAEvent.LISTENING)
@@ -923,6 +934,7 @@ class VoiceSatelliteProtocol(APIServer):
             "Wakeup sound finished, starting audio streaming for: %s",
             wake_word_phrase,
         )
+        self._awaiting_run_start = True
         self.send_messages([VoiceAssistantRequest(start=True, wake_word_phrase=wake_word_phrase)])
         self._is_streaming_audio = True
         self._emit(LVAEvent.LISTENING)
@@ -957,12 +969,20 @@ class VoiceSatelliteProtocol(APIServer):
     def _on_start_listening_sound_finished(self) -> None:
         """Callback invoked when the start-listening chime finishes; begin STT streaming."""
         _LOGGER.debug("Start-listening sound finished, starting audio streaming")
+        self._awaiting_run_start = True
         self.send_messages([VoiceAssistantRequest(start=True, wake_word_phrase="")])
         self._is_streaming_audio = True
         self._emit(LVAEvent.LISTENING)
 
     def stop(self) -> None:
         self.state.active_wake_words.discard(self.state.stop_word.id)
+        if self._is_streaming_audio or self._awaiting_run_start:
+            # Still listening: tell HA to end the run, else it keeps waiting
+            # for speech while wake words re-arm here.
+            self._is_streaming_audio = False
+            self._awaiting_run_start = False
+            self.send_messages([VoiceAssistantRequest(start=False)])
+        was_active = self._pipeline_active
         self._pipeline_active = False
 
         if self._timer_finished:
@@ -973,6 +993,13 @@ class VoiceSatelliteProtocol(APIServer):
             self._emit(LVAEvent.IDLE)
             _LOGGER.debug("Stopping timer finished sound")
         else:
+            if was_active and not self._tts_played:
+                # Stopped before the reply started (listening or thinking):
+                # drop the reply when it arrives — play_tts() skips once
+                # _tts_played is set, and the next RUN_START resets it.
+                self._tts_played = True
+                self.unduck()
+                self._emit(LVAEvent.IDLE)
             # tts_player.stop() invokes the done_callback (_tts_finished),
             # so we don't call _tts_finished() again explicitly.
             self.state.tts_player.stop()
@@ -1013,6 +1040,7 @@ class VoiceSatelliteProtocol(APIServer):
                     self._pipeline_active = False
                     self.unduck()
                     return
+                self._awaiting_run_start = True
                 self.send_messages([VoiceAssistantRequest(start=True)])
                 self._is_streaming_audio = True
                 _LOGGER.debug("Continued conversation started")
