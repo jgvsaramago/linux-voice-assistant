@@ -389,3 +389,45 @@ class TestLoadWav:
             w.writeframes(b"\x80" * 16000)
         with pytest.raises(ValueError):
             load_wav(eight)
+
+
+# --- enrolment from another process (the screen) --------------------------------
+
+
+def _wav(path, samples):
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(pcm16(samples))
+    return str(path)
+
+
+class TestReloadAndJsonCli:
+    def test_running_service_sees_new_enrolment(self, store, backend, tmp_path):
+        ident = SpeakerIdentifier(backend, store, threshold=0.8, margin=0.05)
+        assert ident.identify(voice(300)).reason == "no_profiles"
+        other = ProfileStore(store.path, backend.model_id, backend.dim)  # e.g. the CLI
+        other.enroll("ana", [ident.embedding(voice(300, seed=s))[0] for s in range(2)])
+        assert ident.identify(voice(300, seed=5)).speaker_id == "ana"
+        other.delete("ana")
+        assert ident.identify(voice(300, seed=5)).reason == "no_profiles"
+
+    def test_json_enroll_list_delete(self, tmp_path, monkeypatch, capsys):
+        import linux_voice_assistant.speaker_id.__main__ as cli
+
+        monkeypatch.setattr(cli, "create_backend", lambda kind, path, threads=2: FakeBackend())
+        base = ["--profiles", str(tmp_path / "p.json"), "--json"]
+        good = [_wav(tmp_path / f"a{i}.wav", voice(300, seed=i)) for i in range(2)]
+        bad = _wav(tmp_path / "quiet.wav", silence())
+        assert cli.main(base + ["enroll", "ana", "--name", "Ana", *good, bad]) == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["ok"] and out["samples"] == 2
+        assert [r["ok"] for r in out["report"]] == [True, True, False] and out["report"][2]["reason"] == "no_speech"
+        assert cli.main(base + ["list"]) == 0
+        listed = json.loads(capsys.readouterr().out)
+        assert [s["id"] for s in listed["speakers"]] == ["ana"] and listed["speakers"][0]["name"] == "Ana"
+        assert cli.main(base + ["delete", "ana"]) == 0
+        capsys.readouterr()
+        assert cli.main(base + ["delete", "ana"]) == 1
+        assert json.loads(capsys.readouterr().out) == {"ok": False, "error": "no speaker 'ana' enrolled"}

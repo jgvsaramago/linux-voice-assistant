@@ -144,6 +144,11 @@ $P delete ana                                   # removes Ana and all her stored
 $P reset                                        # removes everyone
 ```
 
+The running assistant notices changes to the profile file (from this CLI or
+the ByteHomeDash screen's Definições → Vozes reconhecidas) before the next
+request; no restart needed. `--json` makes `list`, `enroll`, `add` and
+`delete` print one JSON object, for programs driving the CLI.
+
 Record the samples where people actually talk to the screen — near and a
 few metres away, normal and quieter voice. Each needs at least 1 s of
 speech (silence is trimmed); unusable samples are rejected with the reason.

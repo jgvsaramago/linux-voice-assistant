@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sys
 import time
 import urllib.request
@@ -62,7 +63,16 @@ def record(seconds: float, device: str | None) -> np.ndarray:
         return rec.record(int(seconds * SAMPLE_RATE)).reshape(-1).astype(np.float32)
 
 
-def _samples(args, identifier: SpeakerIdentifier) -> List[np.ndarray]:
+def _out(args, text: str, **data) -> None:
+    """Human text, or one JSON object per command with --json (for the
+    screen's enrolment, which runs this CLI)."""
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False))
+    else:
+        print(text)
+
+
+def _samples(args, identifier: SpeakerIdentifier, report: list | None = None) -> List[np.ndarray]:
     sources = []
     if args.record:
         for i in range(args.record):
@@ -75,10 +85,14 @@ def _samples(args, identifier: SpeakerIdentifier) -> List[np.ndarray]:
     embeddings = []
     for label, audio in sources:
         emb, seconds, why = identifier.embedding(audio)
+        if report is not None:
+            report.append({"sample": label, "ok": emb is not None, "reason": why, "speech_seconds": round(seconds, 2)})
         if emb is None:
-            print(f"  ✗ {label}: rejected ({why}, {seconds:.1f} s of speech; need {identifier.min_speech_seconds:.1f} s)")
+            if not args.json:
+                print(f"  ✗ {label}: rejected ({why}, {seconds:.1f} s of speech; need {identifier.min_speech_seconds:.1f} s)")
             continue
-        print(f"  ✓ {label}: {seconds:.1f} s of speech")
+        if not args.json:
+            print(f"  ✓ {label}: {seconds:.1f} s of speech")
         embeddings.append(emb)
     if not embeddings:
         raise ProfileError("none of the samples had enough speech")
@@ -110,6 +124,7 @@ def main(argv: List[str] | None = None) -> int:
     p.add_argument("--threshold", type=float, default=0.45)
     p.add_argument("--margin", type=float, default=0.10)
     p.add_argument("--min-speech", type=float, default=1.0)
+    p.add_argument("--json", action="store_true", help="machine-readable output (one JSON object)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("download")
     for name in ("enroll", "add"):
@@ -136,29 +151,36 @@ def main(argv: List[str] | None = None) -> int:
     try:
         backend = create_backend(args.backend, args.model, args.threads)
     except BackendUnavailable as err:
-        print(f"Speaker model unavailable: {err}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"ok": False, "error": f"model unavailable: {err}"}))
+        else:
+            print(f"Speaker model unavailable: {err}", file=sys.stderr)
         return 2
     load_ms = (time.perf_counter() - t0) * 1000
     store = ProfileStore(args.profiles, backend.model_id, backend.dim)
     ident = SpeakerIdentifier(backend, store, args.threshold, args.margin, args.min_speech)
     try:
         if args.cmd == "list":
+            if args.json:
+                speakers = [{"id": s.speaker_id, "name": s.name, "samples": len(s.embeddings), "updated": s.updated} for s in store.speakers.values()]
+                print(json.dumps({"ok": True, "incompatible": store.incompatible, "speakers": speakers}, ensure_ascii=False))
+                return 0
             if store.incompatible:
                 print(f"Profiles unusable: {store.incompatible}. Re-enrol, or 'reset' to delete them.")
             for s in store.speakers.values():
                 print(f"{s.speaker_id:16s} {s.name:20s} {len(s.embeddings)} samples, updated {time.strftime('%Y-%m-%d %H:%M', time.localtime(s.updated))}")
             if not store.speakers and not store.incompatible:
                 print("No speakers enrolled.")
-        elif args.cmd == "enroll":
-            s = store.enroll(args.speaker_id, _samples(args, ident), args.name, args.replace)
-            print(f"Enrolled {s.speaker_id} with {len(s.embeddings)} samples.")
-        elif args.cmd == "add":
-            store.get(args.speaker_id)
-            s = store.add(args.speaker_id, _samples(args, ident))
-            print(f"{s.speaker_id} now has {len(s.embeddings)} samples.")
+        elif args.cmd in ("enroll", "add"):
+            report: list = []
+            if args.cmd == "add":
+                store.get(args.speaker_id)
+            embs = _samples(args, ident, report)
+            s = store.enroll(args.speaker_id, embs, args.name, args.replace) if args.cmd == "enroll" else store.add(args.speaker_id, embs)
+            _out(args, f"{s.speaker_id}: {len(s.embeddings)} samples.", ok=True, id=s.speaker_id, samples=len(s.embeddings), report=report)
         elif args.cmd == "delete":
             store.delete(args.speaker_id)
-            print(f"Deleted {args.speaker_id} and all its stored data.")
+            _out(args, f"Deleted {args.speaker_id} and all its stored data.", ok=True, id=args.speaker_id)
         elif args.cmd == "reset":
             store.reset()
             print("All speaker profiles deleted.")
@@ -180,7 +202,10 @@ def main(argv: List[str] | None = None) -> int:
                     times.append((time.perf_counter() - t) * 1000)
                 print(f"{Path(path).name}: {len(audio) / SAMPLE_RATE:.1f} s audio, embedding {np.median(times):.0f} ms (median of 5)")
     except (ProfileError, ValueError) as err:
-        print(f"Error: {err}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(err)}, ensure_ascii=False))
+        else:
+            print(f"Error: {err}", file=sys.stderr)
         return 1
     return 0
 

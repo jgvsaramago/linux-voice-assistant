@@ -53,12 +53,31 @@ class ProfileStore:
         #: is off until they're re-enrolled (or the file is removed).
         self.incompatible: Optional[str] = None
         self.speakers: Dict[str, Speaker] = {}
+        self._mtime: Optional[float] = None
         self._load()
+
+    def reload_if_changed(self) -> bool:
+        """Re-read the file if something else (the CLI, the screen's
+        enrolment) changed it since; cheap enough to call per utterance."""
+        try:
+            mtime: Optional[float] = self.path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime == self._mtime:
+            return False
+        self.incompatible = None
+        self.speakers = {}
+        self._load()
+        _LOGGER.info("Speaker id: profiles reloaded (%d speaker(s))", len(self.speakers))
+        return True
 
     # --- persistence ------------------------------------------------------
 
     def _load(self) -> None:
-        if not self.path.exists():
+        try:
+            self._mtime = self.path.stat().st_mtime
+        except OSError:
+            self._mtime = None
             return
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
@@ -100,6 +119,7 @@ class ProfileStore:
                 json.dump(data, f)
             os.chmod(tmp, 0o600)
             os.replace(tmp, self.path)
+            self._mtime = self.path.stat().st_mtime
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
@@ -140,6 +160,7 @@ class ProfileStore:
         self.speakers = {}
         self.incompatible = None
         self.path.unlink(missing_ok=True)
+        self._mtime = None
 
     def get(self, speaker_id: str) -> Speaker:
         if speaker_id not in self.speakers:

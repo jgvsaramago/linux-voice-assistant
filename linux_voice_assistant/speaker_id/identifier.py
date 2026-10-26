@@ -97,6 +97,7 @@ class SpeakerIdentifier:
 
     def identify(self, samples: np.ndarray) -> SpeakerResult:
         t0 = time.perf_counter()
+        self.store.reload_if_changed()
         if self.store.incompatible or not self.store.speakers:
             return SpeakerResult.unknown(self.source, "no_profiles")
         try:
